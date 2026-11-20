@@ -159,6 +159,7 @@ public class CampaignGUI extends JPanel {
     /** The buttons of the refit site question, in the order they are shown */
     private static final int REFIT_SITE_CANCEL = 0;
     private static final int REFIT_SITE_MOVE = 2;
+    private static final int REFIT_CONFIRM_BEGIN = 1;
 
     @Serial
     private static final long serialVersionUID = 3126634639249129512L;
@@ -236,13 +237,23 @@ public class CampaignGUI extends JPanel {
     private boolean logNagActive = false;
 
     private transient StandardFormationIcon copyFormationIcon = null;
+    /** What the window's close box does instead of quitting MekHQ, or null to quit. */
+    private transient @Nullable Runnable closeAction;
     // endregion Variable Declarations
 
     // region Constructors
     public CampaignGUI(MekHQ app) {
+        this(app, true);
+    }
+
+    /**
+     * The campaign window, shown at once when {@code show}; otherwise it is built hidden but hears the campaign's
+     * events, for the command post to show on one of its tabs later.
+     */
+    public CampaignGUI(MekHQ app, boolean show) {
         this.app = app;
         reportHLL = new ReportHyperlinkListener(this);
-        initComponents();
+        initComponents(show);
         setUserPreferences();
 
         commandCenterTab = new CommandCenterTab(this, MHQTabType.COMMAND_CENTER.toString());
@@ -338,10 +349,20 @@ public class CampaignGUI extends JPanel {
     public void setCopyFormationIcon(final @Nullable StandardFormationIcon copyFormationIcon) {
         this.copyFormationIcon = copyFormationIcon;
     }
+
+    /** Has the window's close box run {@code action} instead of quitting MekHQ; null quits again. */
+    public void setCloseAction(@Nullable Runnable action) {
+        closeAction = action;
+    }
+
+    /** Whether another window hosts this one, so it may stay hidden while the campaign is open. */
+    public boolean isHosted() {
+        return closeAction != null;
+    }
     // endregion Getters/Setters
 
     // region Initialization
-    private void initComponents() {
+    private void initComponents(boolean show) {
         frame = new JFrame("MekHQ");
         frame.setDefaultCloseOperation(JFrame.DO_NOTHING_ON_CLOSE);
         AppIcons.apply(frame, "mekhq");
@@ -440,11 +461,21 @@ public class CampaignGUI extends JPanel {
         frame.getContentPane().add(this, BorderLayout.CENTER);
         frame.validate();
 
-        frame.setVisible(true);
+        if (show) {
+            frame.setVisible(true);
+        } else {
+            // Displayable though hidden, so the tabs register for the campaign's events and keep current meanwhile
+            frame.addNotify();
+        }
         frame.addWindowListener(new WindowAdapter() {
             @Override
             public void windowClosing(WindowEvent evt) {
-                getApplication().exit(true);
+                Runnable action = closeAction;
+                if (action != null) {
+                    action.run();
+                } else {
+                    getApplication().exit(true);
+                }
             }
         });
 
@@ -1381,8 +1412,9 @@ public class CampaignGUI extends JPanel {
         List<String> buttons = List.of(getTextAt(REFIT_RESOURCE_BUNDLE, "refitSite.button.cancel"),
               getFormattedTextAt(REFIT_RESOURCE_BUNDLE, "refitSite.button.stay", currentSiteName),
               getFormattedTextAt(REFIT_RESOURCE_BUNDLE, "refitSite.button.move", requiredSiteName));
+        // Cancel stays first, so closing with X cancels, but the move the rules call for has focus
         ImmersiveDialogSimple dialog = new ImmersiveDialogSimple(campaign, speaker, null, inCharacter, buttons,
-              getTextAt(REFIT_RESOURCE_BUNDLE, "refitSite.rules"), null, false);
+              getTextAt(REFIT_RESOURCE_BUNDLE, "refitSite.rules"), null, false, REFIT_SITE_MOVE);
 
         return switch (dialog.getDialogChoice()) {
             case REFIT_SITE_CANCEL -> {
@@ -1491,10 +1523,11 @@ public class CampaignGUI extends JPanel {
     private boolean isRefitConfirmed(Refit refit) {
         List<String> buttons = List.of(getTextAt(REFIT_RESOURCE_BUNDLE, "refitConfirm.button.cancel"),
               getTextAt(REFIT_RESOURCE_BUNDLE, "refitConfirm.button.begin"));
+        // Cancel stays first, so closing with X cancels, but Begin has focus: the player just chose the tech
         ImmersiveDialogSimple dialog = new ImmersiveDialogSimple(getCampaign(), refit.getTech(), null,
               RefitBriefing.describeInCharacter(getCampaign(), refit), buttons,
-              RefitBriefing.describeOutOfCharacter(getCampaign(), refit), null, false);
-        return dialog.getDialogChoice() == 1;
+              RefitBriefing.describeOutOfCharacter(getCampaign(), refit), null, false, REFIT_CONFIRM_BEGIN);
+        return dialog.getDialogChoice() == REFIT_CONFIRM_BEGIN;
     }
 
     /**

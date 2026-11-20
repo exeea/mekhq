@@ -70,7 +70,6 @@ import megamek.common.icons.Portrait;
 import megamek.common.ui.AppIcons;
 import megamek.common.ui.FastJScrollPane;
 import megamek.logging.MMLogger;
-import mekhq.MHQConstants;
 import mekhq.campaign.Campaign;
 import mekhq.campaign.ForceHumanResources;
 import mekhq.campaign.force.Formation;
@@ -84,6 +83,7 @@ import mekhq.gui.CampaignGUI;
 import mekhq.gui.baseComponents.JScrollablePanel;
 import mekhq.gui.dialog.glossary.GlossaryConsole;
 import mekhq.gui.dialog.glossary.GuideViewer;
+import mekhq.gui.model.view.Transmission;
 import mekhq.gui.utilities.WrapLayout;
 
 /**
@@ -110,6 +110,11 @@ public class ImmersiveDialogCore extends JDialog {
     public final static String SCENARIO_COMMAND_STRING = "SCENARIO";
     /** Links to a StratCon sector, as {@code STRATCON_SECTOR:<contract UUID>:<track index>}. */
     public final static String STRATCON_SECTOR_COMMAND_STRING = "STRATCON_SECTOR";
+    /**
+     * The response button that has keyboard focus unless a dialog asks for another: the first, which is also what
+     * closing the dialog with X returns.
+     */
+    public static final int FIRST_RESPONSE = 0;
 
     private final Campaign campaign;
 
@@ -123,12 +128,15 @@ public class ImmersiveDialogCore extends JDialog {
     private final Person rightSpeaker;
     private final TransmissionSignalQuality signalQuality;
     private final ResponseActivationController responseActivationController;
+    /** The index of the response button that has keyboard focus when the dialog opens, so Space presses it */
+    private final int focusedResponseIndex;
 
     private JSpinner spinner;
     private int spinnerValue;
     private MMComboBox<?> comboBox; // can be null
     private int comboBoxChoiceIndex;
     private FastJScrollPane messageScrollPane;
+    private @Nullable TransmissionRelay relay;
 
     private int dialogChoice = 0;
 
@@ -278,6 +286,38 @@ public class ImmersiveDialogCore extends JDialog {
           String centerMessage, List<ButtonLabelTooltipPair> buttons, @Nullable String outOfCharacterMessage,
           @Nullable Integer centerWidth, boolean isVerticalLayout, @Nullable JPanel supplementalPanel,
           @Nullable ImageIcon imageIcon, TransmissionSignalQuality signalQuality, boolean isModal) {
+        this(campaign,
+              leftSpeaker,
+              rightSpeaker,
+              centerMessage,
+              buttons,
+              outOfCharacterMessage,
+              centerWidth,
+              isVerticalLayout,
+              supplementalPanel,
+              imageIcon,
+              signalQuality,
+              FIRST_RESPONSE,
+              isModal);
+    }
+
+    /**
+     * Constructs an immersive dialog that opens with keyboard focus on a chosen response button, so pressing Space
+     * picks it. Closing the dialog with X still returns the first response, so a dialog can keep a safe choice such as
+     * Cancel first while focusing the choice the player most likely wants.
+     *
+     * <p>The remaining parameters inherit the contracts documented by the adjacent constructors.</p>
+     *
+     * @param focusedResponseIndex the index in {@code buttons} of the response to focus; an index outside the list
+     *                             leaves focus on the first response
+     *
+     * @throws NullPointerException if {@code signalQuality} is {@code null}
+     */
+    public ImmersiveDialogCore(Campaign campaign, @Nullable Person leftSpeaker, @Nullable Person rightSpeaker,
+          String centerMessage, List<ButtonLabelTooltipPair> buttons, @Nullable String outOfCharacterMessage,
+          @Nullable Integer centerWidth, boolean isVerticalLayout, @Nullable JPanel supplementalPanel,
+          @Nullable ImageIcon imageIcon, TransmissionSignalQuality signalQuality, int focusedResponseIndex,
+          boolean isModal) {
         super(resolveOwner(campaign));
         if (getOwner() == null) {
             // Unowned dialogs get their own taskbar entry, so give it the MekHQ icon instead of the Java default
@@ -289,6 +329,7 @@ public class ImmersiveDialogCore extends JDialog {
         this.leftSpeaker = leftSpeaker;
         this.rightSpeaker = rightSpeaker;
         this.signalQuality = Objects.requireNonNull(signalQuality, "signalQuality");
+        this.focusedResponseIndex = focusedResponseIndex;
         responseActivationController = new ResponseActivationController(this::dispose);
 
         CENTER_WIDTH = (centerWidth != null) ? centerWidth : CENTER_WIDTH;
@@ -385,20 +426,111 @@ public class ImmersiveDialogCore extends JDialog {
         setDefaultCloseOperation(DISPOSE_ON_CLOSE);
         setModal(isModal);
         setLocationRelativeTo(locationReference); // Needs to be after pack
+        relay = TransmissionRelay.of(this, new TransmissionRelay.Content(centerMessage, buttons,
+              outOfCharacterMessage, CENTER_WIDTH, isVerticalLayout, supplementalPanel, imageIcon, signalQuality));
         setVisible(true);
+    }
+
+    /**
+     * Shows or hides the dialog. While a screen hosts the campaign, it shows the dialog as a transmission in place of
+     * this window, and a modal dialog waits here for the answer as it would for its window.
+     */
+    @Override
+    public void setVisible(boolean visible) {
+        TransmissionRelay transmission = relay;
+        if (transmission != null) {
+            if (!visible) {
+                transmission.withdraw();
+            } else if (!isVisible() && transmission.show()) {
+                return;
+            }
+        }
+        super.setVisible(visible);
+    }
+
+    @Override
+    public void dispose() {
+        TransmissionRelay transmission = relay;
+        if (transmission != null) {
+            transmission.withdraw();
+        }
+        super.dispose();
+    }
+
+    /** Shows this window, as when no screen takes the dialog as a transmission. */
+    void showWindow() {
+        super.setVisible(true);
+    }
+
+    /** Answers the dialog with response {@code choice}, as clicking its button does. */
+    void respond(int choice) {
+        responseActivationController.activate(() -> captureResponseState(choice));
+    }
+
+    @Nullable Person leftSpeaker() {
+        return leftSpeaker;
+    }
+
+    Campaign campaign() {
+        return campaign;
+    }
+
+    @Nullable Person rightSpeaker() {
+        return rightSpeaker;
+    }
+
+    /**
+     * The speaker as a screen hosting the campaign shows them in a transmission. Dialogs that build their own speaker
+     * panel override this to match it; if they don't, they show their window instead.
+     *
+     * @param speaker  the speaker
+     * @param campaign the dialog's campaign
+     * @param left     whether they speak at the left
+     *
+     * @return the speaker, or null to show the window instead
+     */
+    protected @Nullable Transmission.Speaker transmissionSpeaker(Person speaker, Campaign campaign, boolean left) {
+        if (overrides("buildLeftSpeakerPanel") || (!left && overrides("buildRightSpeakerPanel"))) {
+            return null;
+        }
+        String name = speaker.getFullTitle();
+        ImageIcon icon = getSpeakerIcon(campaign, speaker);
+        if (icon != null) {
+            icon = scaleImageIcon(icon, IMAGE_WIDTH, true);
+        }
+        return new Transmission.Speaker(getSourceLabel(speaker),
+              getSpeakerDescription(campaign, speaker, name).toString(), transmissionPicture(icon), true);
+    }
+
+    /** {@code icon} as a transmission shows it, or null when there is no icon or it has no size. */
+    protected static @Nullable Transmission.Picture transmissionPicture(@Nullable ImageIcon icon) {
+        return TransmissionRelay.picture(icon);
+    }
+
+    private boolean overrides(String method) {
+        for (Class<?> type = getClass(); type != ImmersiveDialogCore.class; type = type.getSuperclass()) {
+            try {
+                type.getDeclaredMethod(method, Person.class, Campaign.class);
+                return true;
+            } catch (NoSuchMethodException ignored) {
+                // Not declared here; look further up
+            }
+        }
+        return false;
     }
 
     /**
      * Picks the owner window for this dialog.
      *
-     * <p>When the campaign window is visible, the dialog is owned by it so it stays on top of it and shares its
-     * taskbar entry. Otherwise (for example during startup, before the campaign window exists), the dialog has no
+     * <p>When the campaign window is visible, or hidden behind a window that hosts it, the dialog is owned by it so
+     * it stays on top of it (or of its host) and shares its taskbar entry. Otherwise (for example during startup,
+     * before the campaign window exists), the dialog has no
      * owner. Without an explicit {@code null} owner, Swing would attach the dialog to a hidden shared frame, which
      * leaves it out of the Windows taskbar and Alt+Tab.</p>
      *
      * @param campaign the campaign the dialog belongs to; may be {@code null}
      *
-     * @return the visible campaign window, or {@code null} if there is none
+     * @return the visible or hosted campaign window, or {@code null} if there is none
      */
     private static @Nullable Window resolveOwner(@Nullable Campaign campaign) {
         if (campaign == null) {
@@ -409,14 +541,15 @@ public class ImmersiveDialogCore extends JDialog {
             return null;
         }
         JFrame frame = campaignGUI.getFrame();
-        return ((frame != null) && frame.isShowing()) ? frame : null;
+        // A hosted window stays hidden behind its host, which shows the dialogs it owns
+        return ((frame != null) && (frame.isShowing() || campaignGUI.isHosted())) ? frame : null;
     }
 
     /**
      * Sets the title of the dialog window using localized text.
      */
     protected void setTitle() {
-        setTitle(MHQConstants.PROJECT_NAME);
+        setTitle(getText("incomingTransmission.title"));
     }
 
     private String getSourceLabel(Person speaker) {
@@ -870,6 +1003,7 @@ public class ImmersiveDialogCore extends JDialog {
         gbc.weightx = isVerticalLayout ? 1 : 0;
 
         List<TransmissionResponseButton> buttonList = new ArrayList<>();
+        TransmissionResponseButton focusedButton = null;
 
         // First pass: Create buttons and determine the largest size
         for (ButtonLabelTooltipPair buttonStrings : buttons) {
@@ -922,11 +1056,15 @@ public class ImmersiveDialogCore extends JDialog {
             int responseIndex = buttons.indexOf(buttonStrings);
             button.addActionListener(evt -> responseActivationController.activate(
                 () -> captureResponseState(responseIndex)));
+            if (responseIndex == focusedResponseIndex) {
+                focusedButton = button;
+            }
 
             buttonList.add(button);
         }
 
         applyUniformButtonSizes(buttonList);
+        focusOnOpen(focusedButton);
 
         // Final pass: Add buttons to the panel
         for (TransmissionResponseButton button : buttonList) {
@@ -955,6 +1093,28 @@ public class ImmersiveDialogCore extends JDialog {
 
     static String resolveHorizontalButtonText(String label, String tooltip) {
         return label != null ? label : tooltip;
+    }
+
+    /**
+     * Gives the chosen response button keyboard focus when the dialog opens, in place of the first one.
+     *
+     * @param focusedButton the button for {@link #focusedResponseIndex}, or {@code null} if no button has that index
+     */
+    private void focusOnOpen(@Nullable JButton focusedButton) {
+        if (focusedResponseIndex == FIRST_RESPONSE) {
+            return;
+        }
+        if (focusedButton == null) {
+            LOGGER.debug("[ImmersiveDialog] No response {} to focus; the first response keeps focus",
+                  focusedResponseIndex);
+            return;
+        }
+        setFocusTraversalPolicy(new LayoutFocusTraversalPolicy() {
+            @Override
+            public Component getInitialComponent(Window window) {
+                return focusedButton;
+            }
+        });
     }
 
     static void applyUniformButtonSizes(List<? extends JButton> buttons) {

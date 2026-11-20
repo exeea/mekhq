@@ -72,12 +72,14 @@ import megamek.client.Client;
 import megamek.client.HeadlessClient;
 import megamek.client.bot.princess.BehaviorSettings;
 import megamek.client.ui.clientGUI.GUIPreferences;
+import megamek.client.ui.clientGUI.boardview.gpu.GpuStartWindow;
 import megamek.client.ui.dialogs.LicensingDialog;
 import megamek.client.ui.dialogs.abstractDialogs.AutoResolveChanceDialog;
 import megamek.client.ui.dialogs.abstractDialogs.AutoResolveProgressDialog;
 import megamek.client.ui.dialogs.gameConnectionDialogs.ConnectDialog;
 import megamek.client.ui.dialogs.gameConnectionDialogs.HostDialog;
 import megamek.client.ui.dialogs.helpDialogs.AutoResolveSimulationLogDialog;
+import megamek.client.ui.dialogs.releaseNotes.ReleaseNotes;
 import megamek.client.ui.preferences.PreferencesNode;
 import megamek.client.ui.preferences.SuitePreferences;
 import megamek.client.ui.util.UIUtil;
@@ -124,11 +126,11 @@ import mekhq.campaign.mission.scenarios.ScenarioTemplate.BattlefieldControlType;
 import mekhq.campaign.personnel.Person;
 import mekhq.campaign.unit.Unit;
 import mekhq.gui.CampaignGUI;
+import mekhq.gui.MHQStartScreen;
 import mekhq.gui.baseComponents.immersiveDialogs.ImmersiveDialogSimple;
 import mekhq.gui.dialog.ChooseMulFilesDialog;
 import mekhq.gui.dialog.MekHQAboutDialog;
 import mekhq.gui.dialog.ResolveScenarioWizardDialog;
-import mekhq.gui.panels.StartupScreenPanel;
 import mekhq.gui.preferences.StringPreference;
 import mekhq.gui.utilities.ObservableString;
 import mekhq.service.AutosaveService;
@@ -255,12 +257,17 @@ public class MekHQ implements GameListener {
         setTooltipSettings();
 
         initEventHandlers();
-        // create a start-up frame and display it
-        new StartupScreenPanel(this).getFrame().setVisible(true);
+        MHQStartScreen.show(this, true);
 
-        // Show licensing/welcome dialog after startup screen is visible
-        LicensingDialog.showIfNeeded(null,
-              "Welcome to " + MHQConstants.PROJECT_NAME + " " + MHQConstants.VERSION);
+        // Show the licensing/welcome dialog once the greeting has played: on the start screen, or as the Swing form when
+        // no start screen could open
+        GpuStartWindow.whenSettled(() -> {
+            if (!GpuStartWindow.showWelcome()) {
+                LicensingDialog.showIfNeeded(null,
+                      "Welcome to " + MHQConstants.PROJECT_NAME + " " + MHQConstants.VERSION);
+            }
+        });
+        ReleaseNotes.rememberRunningVersion();
     }
 
     /**
@@ -286,7 +293,7 @@ public class MekHQ implements GameListener {
      */
     public void restart() {
         deactivateCampaign();
-        new StartupScreenPanel(this).getFrame().setVisible(true);
+        MHQStartScreen.show(this, false);
     }
 
     /**
@@ -381,10 +388,18 @@ public class MekHQ implements GameListener {
      * @param campaign the {@link Campaign} to be activated
      */
     public void activateCampaign(Campaign campaign) {
+        activateCampaign(campaign, true);
+    }
+
+    /**
+     * Activates a campaign as {@link #activateCampaign(Campaign)} does, with its window hidden unless {@code show}: the
+     * command post shows the window on one of its tabs when the player goes there.
+     */
+    public void activateCampaign(Campaign campaign, boolean show) {
         deactivateCampaign();
         campaignController = new CampaignController(this, campaign);
         campaignController.setHost(campaign.getId());
-        campaignGUI = new CampaignGUI(this);
+        campaignGUI = new CampaignGUI(this, show);
         campaign.setGUI(campaignGUI);
         campaignController.activate();
     }
